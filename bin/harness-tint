@@ -1,0 +1,1253 @@
+#!/usr/bin/env bash
+# Color the terminal backdrop from the active coding harness and model.
+# Bash 3.2 compatible. See the README for terminal backends and live updates.
+set -eu
+
+ROOT="$(cd "$(dirname -- "$0")/.." && pwd)"
+PALETTE="$ROOT/share/palette.tsv"
+MARKER_BEGIN="# >>> harness-tint >>>"
+MARKER_END="# <<< harness-tint <<<"
+
+log() {
+  if [ "${HARNESS_TINT_VERBOSE:-}" = "1" ]; then
+    printf 'harness-tint: %s\n' "$*" >&2
+  fi
+}
+
+note() {
+  printf 'harness-tint: %s\n' "$*" >&2
+}
+
+die() {
+  printf 'harness-tint: %s\n' "$*" >&2
+  exit 1
+}
+
+lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+is_harness() {
+  case "$1" in
+    codex|claude|grok|agy|muse|prime) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+home_dir() {
+  printf '%s\n' "${HARNESS_TINT_HOME:-$HOME}"
+}
+
+state_root() {
+  if [ -n "${HARNESS_TINT_STATE_DIR:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_STATE_DIR"
+    return
+  fi
+  local base="${XDG_STATE_HOME:-$(home_dir)/.local/state}"
+  printf '%s\n' "$base/harness-tint"
+}
+
+current_tty() {
+  if [ -n "${HARNESS_TINT_TTY:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_TTY"
+    return 0
+  fi
+  if [ -r /dev/tty ]; then
+    local t
+    # Opening /dev/tty prints "Device not configured" from the shell itself
+    # when this process has no controlling terminal. Keep that off stderr.
+    t="$( (tty </dev/tty) 2>/dev/null || true)"
+    if [ -n "$t" ] && [ "$t" != "not a tty" ]; then
+      printf '%s\n' "$t"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+tty_key() {
+  local t
+  t="$(current_tty)" || return 1
+  printf '%s\n' "$t" | tr '/' '_'
+}
+
+session_dir() {
+  local key
+  key="$(tty_key)" || return 1
+  printf '%s\n' "$(state_root)/$key"
+}
+
+backend_name() {
+  if [ -n "${HARNESS_TINT_BACKEND:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_BACKEND"
+    return
+  fi
+  case "${TERM_PROGRAM:-}" in
+    Apple_Terminal) printf '%s\n' apple; return ;;
+    iTerm.app|ghostty|WezTerm|alacritty) printf '%s\n' osc; return ;;
+  esac
+  if [ -n "${KITTY_WINDOW_ID:-}" ] || [ -n "${WEZTERM_PANE:-}" ]; then
+    printf '%s\n' osc
+    return
+  fi
+  printf '%s\n' none
+}
+
+# --- palette ---------------------------------------------------------------
+
+base_channels() {
+  local harness="$1" kind name r g b
+  while IFS="$(printf '\t')" read -r kind name r g b; do
+    case "$kind" in
+      ""|\#*) continue ;;
+    esac
+    if [ "$kind" = "harness" ] && [ "$name" = "$harness" ]; then
+      printf '%s %s %s\n' "$r" "$g" "$b"
+      return 0
+    fi
+  done <"$PALETTE"
+  return 1
+}
+
+pin_slot() {
+  local harness="$1" model="$2" kind h m slot
+  while IFS="$(printf '\t')" read -r kind h m slot _; do
+    case "$kind" in
+      ""|\#*) continue ;;
+    esac
+    if [ "$kind" = "pin" ] && [ "$h" = "$harness" ] && [ "$m" = "$model" ]; then
+      printf '%s\n' "$slot"
+      return 0
+    fi
+  done <"$PALETTE"
+  return 1
+}
+
+fnv_slot() {
+  local s="$1" h=2166136261 c bytes
+  bytes="$(printf '%s' "$s" | od -An -tu1)"
+  for c in $bytes; do
+    h=$(( (h ^ c) & 4294967295 ))
+    h=$(( (h * 16777619) & 4294967295 ))
+  done
+  printf '%s\n' "$((h % 5))"
+}
+
+slot_for() {
+  local harness="$1" model slot suffix
+  model="$(lower "$2")"
+  if slot="$(pin_slot "$harness" "$model")"; then
+    printf '%s\n' "$slot"
+    return
+  fi
+  case "$model" in
+    */*)
+      suffix="${model##*/}"
+      if slot="$(pin_slot "$harness" "$suffix")"; then
+        printf '%s\n' "$slot"
+        return
+      fi
+      ;;
+  esac
+  fnv_slot "$model"
+}
+
+scale_channel() {
+  local value="$1" num="$2" out
+  out=$(( (value * num + 50) / 100 ))
+  if [ "$out" -gt 255 ]; then
+    out=255
+  fi
+  printf '%s\n' "$out"
+}
+
+color_hex() {
+  local harness="$1" model="$2" r g b slot num rr gg bb
+  is_harness "$harness" || return 1
+  read -r r g b <<EOF
+$(base_channels "$harness")
+EOF
+  slot="$(slot_for "$harness" "$model")"
+  case "$slot" in
+    0|1|2|3|4) ;;
+    *) die "slot for $harness $model is '$slot'" ;;
+  esac
+  num=$((100 + slot * 28))
+  rr="$(scale_channel "$r" "$num")"
+  gg="$(scale_channel "$g" "$num")"
+  bb="$(scale_channel "$b" "$num")"
+  printf '#%02x%02x%02x\n' "$rr" "$gg" "$bb"
+}
+
+hex_channels() {
+  local hex="${1#\#}" r g b
+  r=$((16#${hex:0:2}))
+  g=$((16#${hex:2:2}))
+  b=$((16#${hex:4:2}))
+  printf '%s %s %s\n' "$r" "$g" "$b"
+}
+
+# --- model detection -------------------------------------------------------
+
+toml_before_table() {
+  local file="$1" key="$2" raw
+  [ -f "$file" ] || return 1
+  raw="$(awk -v key="$key" '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[/ { exit }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      val = $0
+      sub(/^[^=]*=[[:space:]]*/, "", val)
+      sub(/[[:space:]]+#.*$/, "", val)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+      print val
+      exit
+    }
+  ' "$file")"
+  [ -n "$raw" ] || return 1
+  strip_toml_string "$raw"
+}
+
+toml_in_table() {
+  local file="$1" table="$2" key="$3" raw
+  [ -f "$file" ] || return 1
+  raw="$(awk -v table="$table" -v key="$key" '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[/ {
+      line = $0
+      gsub(/[[:space:]]/, "", line)
+      in_table = (line == "[" table "]")
+      next
+    }
+    in_table && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      val = $0
+      sub(/^[^=]*=[[:space:]]*/, "", val)
+      sub(/[[:space:]]+#.*$/, "", val)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+      print val
+      exit
+    }
+  ' "$file")"
+  [ -n "$raw" ] || return 1
+  strip_toml_string "$raw"
+}
+
+json_key() {
+  local file="$1" key="$2" value=""
+  [ -f "$file" ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    value="$(python3 -c '
+import json, sys
+key = sys.argv[2]
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+val = data.get(key, "")
+if isinstance(val, str):
+    sys.stdout.write(val)
+' "$file" "$key" 2>/dev/null || true)"
+  else
+    value="$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | head -n 1)"
+  fi
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+model_from_json_text() {
+  local json="$1"
+  [ -n "$json" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$json" | jq -r '
+      if ((.to_model? | type) == "string") and .to_model != "" then .to_model
+      elif ((.model? | type) == "string") and .model != "" then .model
+      elif ((.model.id? | type) == "string") and .model.id != "" then .model.id
+      elif ((.model.display_name? | type) == "string") and .model.display_name != "" then .model.display_name
+      else empty end
+    ' 2>/dev/null || true
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+if not raw.strip():
+    raise SystemExit(0)
+data = json.loads(raw)
+def emit(value):
+    if isinstance(value, str) and value:
+        sys.stdout.write(value)
+        raise SystemExit(0)
+emit(data.get("to_model"))
+model = data.get("model")
+if isinstance(model, str):
+    emit(model)
+elif isinstance(model, dict):
+    emit(model.get("id"))
+    emit(model.get("display_name"))
+' 2>/dev/null || true
+  fi
+}
+
+strip_toml_string() {
+  local v="$1"
+  v=${v#\"}
+  v=${v%\"}
+  v=${v#\'}
+  v=${v%\'}
+  printf '%s\n' "$v"
+}
+
+model_from_args() {
+  local harness="$1" prev="" model="" provider="" arg value
+  shift
+  for arg in "$@"; do
+    case "$arg" in
+      --model=*) model="${arg#--model=}" ;;
+      --provider=*) provider="${arg#--provider=}" ;;
+      -m|--model) prev=model ;;
+      --provider) prev=provider ;;
+      -c|--config) prev=config ;;
+      *)
+        case "$prev" in
+          model) model="$arg"; prev="" ;;
+          provider) provider="$arg"; prev="" ;;
+          config)
+            case "$arg" in
+              model=*|model\ =*)
+                value="${arg#model=}"
+                value="${value#model }"
+                value="${value#=}"
+                value="$(strip_toml_string "$value")"
+                model="$value"
+                ;;
+            esac
+            prev=""
+            ;;
+          *) prev="" ;;
+        esac
+        ;;
+    esac
+  done
+  if [ "$harness" = "prime" ] && [ -n "$provider" ] && [ -n "$model" ]; then
+    printf '%s/%s\n' "$provider" "$model"
+    return 0
+  fi
+  if [ -n "$model" ]; then
+    printf '%s\n' "$model"
+    return 0
+  fi
+  return 1
+}
+
+codex_config_file() {
+  if [ -n "${HARNESS_TINT_CODEX_CONFIG:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_CODEX_CONFIG"
+  else
+    printf '%s\n' "${CODEX_HOME:-$(home_dir)/.codex}/config.toml"
+  fi
+}
+
+claude_settings_file() {
+  printf '%s\n' "${HARNESS_TINT_CLAUDE_SETTINGS:-$(home_dir)/.claude/settings.json}"
+}
+
+grok_config_file() {
+  printf '%s\n' "${HARNESS_TINT_GROK_CONFIG:-$(home_dir)/.grok/config.toml}"
+}
+
+agy_settings_file() {
+  printf '%s\n' "${HARNESS_TINT_AGY_SETTINGS:-$(home_dir)/.gemini/antigravity-cli/settings.json}"
+}
+
+muse_settings_file() {
+  if [ -n "${HARNESS_TINT_MUSE_SETTINGS:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_MUSE_SETTINGS"
+  elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s\n' "$XDG_CONFIG_HOME/muse/settings.json"
+  else
+    printf '%s\n' "$(home_dir)/.config/muse/settings.json"
+  fi
+}
+
+prime_settings_file() {
+  printf '%s\n' "${HARNESS_TINT_PRIME_SETTINGS:-$(home_dir)/.prime/agent/settings.json}"
+}
+
+codex_hooks_file() {
+  if [ -n "${HARNESS_TINT_CODEX_HOOKS:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_CODEX_HOOKS"
+  else
+    printf '%s\n' "${CODEX_HOME:-$(home_dir)/.codex}/hooks.json"
+  fi
+}
+
+zshrc_file() {
+  printf '%s\n' "${HARNESS_TINT_ZSHRC:-$(home_dir)/.zshrc}"
+}
+
+model_from_config() {
+  local harness="$1" file provider model
+  case "$harness" in
+    codex)
+      file="$(codex_config_file)"
+      toml_before_table "$file" model || return 1
+      ;;
+    claude)
+      json_key "$(claude_settings_file)" model || return 1
+      ;;
+    grok)
+      file="$(grok_config_file)"
+      toml_in_table "$file" models default || return 1
+      ;;
+    agy)
+      json_key "$(agy_settings_file)" model || return 1
+      ;;
+    muse)
+      json_key "$(muse_settings_file)" model || return 1
+      ;;
+    prime)
+      file="$(prime_settings_file)"
+      provider="$(json_key "$file" defaultProvider || true)"
+      model="$(json_key "$file" defaultModel || true)"
+      if [ -n "$provider" ] && [ -n "$model" ]; then
+        printf '%s/%s\n' "$provider" "$model"
+      elif [ -n "$model" ]; then
+        printf '%s\n' "$model"
+      else
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_model() {
+  local harness="$1"
+  shift
+  local found=""
+  if [ -n "${HARNESS_TINT_MODEL:-}" ]; then
+    printf '%s\n' "$HARNESS_TINT_MODEL"
+    return 0
+  fi
+  if found="$(model_from_args "$harness" "$@")"; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  if found="$(model_from_config "$harness")"; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  printf '%s\n' unknown
+}
+
+# --- terminal backends -----------------------------------------------------
+
+run_bounded() {
+  local pid i=0
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt 40 ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+  done
+  set +e
+  wait "$pid"
+  local status=$?
+  set -e
+  return "$status"
+}
+
+apple_invoke() {
+  local mode="$1" tty_path="$2" r16="${3:-}" g16="${4:-}" b16="${5:-}" title="${6:-}"
+  run_bounded /usr/bin/osascript - "$mode" "$tty_path" "$r16" "$g16" "$b16" "$title" <<'APPLESCRIPT'
+on run argv
+  set mode to item 1 of argv
+  set targetTty to item 2 of argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        try
+          set tabTty to tty of t
+          set bare to tabTty
+          if bare begins with "/dev/" then set bare to text 6 thru -1 of bare
+          set want to targetTty
+          if want begins with "/dev/" then set want to text 6 thru -1 of want
+          if bare is want then
+            if mode is "get" then
+              set bg to background color of t
+              set titleText to ""
+              try
+                set titleText to custom title of t
+              end try
+              if titleText is missing value then set titleText to ""
+              return (item 1 of bg as text) & " " & (item 2 of bg as text) & " " & (item 3 of bg as text) & linefeed & titleText
+            else
+              set background color of t to {(item 3 of argv) as integer, (item 4 of argv) as integer, (item 5 of argv) as integer}
+              return "ok"
+            end if
+          end if
+        end try
+      end repeat
+    end repeat
+  end tell
+  error "no Terminal tab for " & targetTty
+end run
+APPLESCRIPT
+}
+
+osc_set() {
+  local hex="$1"
+  [ -w /dev/tty ] || return 1
+  printf '\033]11;%s\007' "$hex" >/dev/tty
+}
+
+osc_reset() {
+  [ -w /dev/tty ] || return 1
+  printf '\033]111\007' >/dev/tty
+}
+
+dry_log() {
+  printf '%s\n' "${HARNESS_TINT_DRY_LOG:-$(state_root)/dry.log}"
+}
+
+backend_get() {
+  local backend
+  backend="$(backend_name)"
+  case "$backend" in
+    dry)
+      printf '%s\n' "${HARNESS_TINT_DRY_ORIGINAL:-257 514 771}"
+      printf '\n'
+      ;;
+    apple)
+      apple_invoke get "$(current_tty)"
+      ;;
+    osc|none)
+      return 2
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+backend_set() {
+  local hex="$1" title="${2:-}" backend r g b r16 g16 b16
+  backend="$(backend_name)"
+  read -r r g b <<EOF
+$(hex_channels "$hex")
+EOF
+  r16=$((r * 257))
+  g16=$((g * 257))
+  b16=$((b * 257))
+  case "$backend" in
+    dry)
+      mkdir -p "$(dirname -- "$(dry_log)")"
+      printf 'set %s %s\n' "$hex" "$title" >>"$(dry_log)"
+      ;;
+    apple)
+      apple_invoke set "$(current_tty)" "$r16" "$g16" "$b16" "$title" >/dev/null
+      ;;
+    osc)
+      osc_set "$hex" "$title"
+      ;;
+    none)
+      log "no backdrop backend for this terminal"
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+backend_reset() {
+  local title="$1" backend r g b
+  backend="$(backend_name)"
+  case "$backend" in
+    dry)
+      mkdir -p "$(dirname -- "$(dry_log)")"
+      printf 'reset %s\n' "$title" >>"$(dry_log)"
+      ;;
+    apple)
+      read -r r g b <<EOF
+$(cat "$(session_dir)/original_rgb")
+EOF
+      apple_invoke set "$(current_tty)" "$r" "$g" "$b" "$title" >/dev/null
+      ;;
+    osc)
+      osc_reset
+      ;;
+    none)
+      return 0
+      ;;
+  esac
+}
+
+tab_title() {
+  local harness="$1" model="$2"
+  model="$(printf '%s' "$model" | tr '\n' ' ' | cut -c 1-80)"
+  printf '%s · %s' "$harness" "$model"
+}
+
+# --- session stack ---------------------------------------------------------
+
+acquire_lock() {
+  local dir="$1" i=0
+  mkdir -p "$dir"
+  while ! mkdir "$dir/lock" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt 50 ]; then
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
+release_lock() {
+  rmdir "$1/lock" 2>/dev/null || true
+}
+
+top_frame_name() {
+  local dir="$1" name=""
+  [ -d "$dir/frames" ] || return 1
+  name="$(find "$dir/frames" -mindepth 1 -maxdepth 1 -type d -exec basename -- {} \; 2>/dev/null | sort | tail -n 1)"
+  [ -n "$name" ] || return 1
+  printf '%s\n' "$name"
+}
+
+read_frame() {
+  local frame="$1" field="$2"
+  [ -f "$frame/$field" ] || return 1
+  cat "$frame/$field"
+}
+
+save_original_if_needed() {
+  local dir="$1" backend raw r g b title
+  [ -f "$dir/original_saved" ] && return 0
+  backend="$(backend_name)"
+  printf '%s\n' "$backend" >"$dir/backend"
+  if [ "$backend" = "osc" ] || [ "$backend" = "none" ]; then
+    : >"$dir/original_title"
+    : >"$dir/original_rgb"
+    : >"$dir/original_saved"
+    return 0
+  fi
+  raw="$(backend_get)" || return 1
+  r="$(printf '%s\n' "$raw" | head -n 1)"
+  title="$(printf '%s\n' "$raw" | tail -n +2)"
+  printf '%s\n' "$r" >"$dir/original_rgb"
+  printf '%s' "$title" >"$dir/original_title"
+  : >"$dir/original_saved"
+}
+
+apply_color() {
+  local harness="$1" model="$2" hex title
+  hex="$(color_hex "$harness" "$model")" || return 1
+  title="$(tab_title "$harness" "$model")"
+  backend_set "$hex" "$title"
+}
+
+push_frame() {
+  local dir="$1" harness="$2" model="$3" hex name n=0 d
+  hex="$(color_hex "$harness" "$model")" || return 1
+  mkdir -p "$dir/frames"
+  for d in "$dir/frames"/*; do
+    [ -d "$d" ] || continue
+    n=$((n + 1))
+  done
+  n=$((n + 1))
+  name="$(printf '%04d' "$n")"
+  mkdir -p "$dir/frames/$name"
+  printf '%s\n' "$harness" >"$dir/frames/$name/harness"
+  printf '%s\n' "$model" >"$dir/frames/$name/model"
+  printf '%s\n' "$hex" >"$dir/frames/$name/hex"
+  apply_color "$harness" "$model"
+}
+
+replace_top() {
+  local dir="$1" frame="$2" harness="$3" model="$4" hex current
+  hex="$(color_hex "$harness" "$model")" || return 1
+  current="$(read_frame "$dir/frames/$frame" hex || true)"
+  printf '%s\n' "$harness" >"$dir/frames/$frame/harness"
+  printf '%s\n' "$model" >"$dir/frames/$frame/model"
+  printf '%s\n' "$hex" >"$dir/frames/$frame/hex"
+  if [ "$current" = "$hex" ]; then
+    return 0
+  fi
+  apply_color "$harness" "$model"
+}
+
+_push_or_replace() {
+  local dir="$1" harness="$2" model="$3" frame top_harness
+  save_original_if_needed "$dir" || return 1
+  frame="$(top_frame_name "$dir" || true)"
+  if [ -n "$frame" ]; then
+    top_harness="$(read_frame "$dir/frames/$frame" harness || true)"
+    if [ "$top_harness" = "$harness" ]; then
+      replace_top "$dir" "$frame" "$harness" "$model"
+      return
+    fi
+  fi
+  push_frame "$dir" "$harness" "$model"
+}
+
+push_or_replace() {
+  local harness="$1" model="$2" dir status=0
+  dir="$(session_dir)" || return 1
+  acquire_lock "$dir" || return 1
+  set +e
+  _push_or_replace "$dir" "$harness" "$model"
+  status=$?
+  set -e
+  release_lock "$dir"
+  return "$status"
+}
+
+_pop_frame() {
+  local dir="$1" harness="$2" frame top_harness next model title
+  frame="$(top_frame_name "$dir" || true)"
+  if [ -z "$frame" ]; then
+    return 0
+  fi
+  top_harness="$(read_frame "$dir/frames/$frame" harness || true)"
+  if [ -n "$harness" ] && [ "$top_harness" != "$harness" ]; then
+    log "top frame is $top_harness, leaving it in place"
+    return 0
+  fi
+  rm -rf "$dir/frames/$frame"
+  next="$(top_frame_name "$dir" || true)"
+  if [ -n "$next" ]; then
+    model="$(read_frame "$dir/frames/$next" model)"
+    top_harness="$(read_frame "$dir/frames/$next" harness)"
+    apply_color "$top_harness" "$model" || true
+    return 0
+  fi
+  title="$(cat "$dir/original_title" 2>/dev/null || true)"
+  backend_reset "$title" || true
+  rm -rf "$dir"
+}
+
+pop_frame() {
+  local harness="$1" dir status=0
+  dir="$(session_dir)" || return 0
+  [ -d "$dir" ] || return 0
+  acquire_lock "$dir" || return 1
+  set +e
+  _pop_frame "$dir" "$harness"
+  status=$?
+  set -e
+  release_lock "$dir"
+  return "$status"
+}
+
+cmd_apply() {
+  local harness="${1:-}" model="${2:-}"
+  is_harness "$harness" || die "apply needs a harness: codex, claude, grok, agy, muse, prime"
+  if [ -z "$model" ]; then
+    model="$(resolve_model "$harness")"
+  fi
+  push_or_replace "$harness" "$model"
+  color_hex "$harness" "$model"
+}
+
+cmd_restore() {
+  pop_frame "${1:-}"
+}
+
+cmd_wrap() {
+  local harness="${1:-}"
+  shift || true
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+  is_harness "$harness" || die "wrap needs a harness and a command"
+  [ "$#" -gt 0 ] || die "wrap needs a command after --"
+  local arg status=0
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help|--version|-V)
+        set +e
+        "$@"
+        status=$?
+        set -e
+        return "$status"
+        ;;
+    esac
+  done
+  if [ "${HARNESS_TINT_DISABLE:-}" = "1" ]; then
+    set +e
+    "$@"
+    status=$?
+    set -e
+    return "$status"
+  fi
+  local model cleaned=0
+  model="$(resolve_model "$harness" "$@")"
+  if ! push_or_replace "$harness" "$model"; then
+    log "backdrop unchanged"
+  fi
+  cleanup() {
+    if [ "$cleaned" -eq 1 ]; then
+      return
+    fi
+    cleaned=1
+    pop_frame "$harness" || true
+  }
+  trap cleanup EXIT INT TERM
+  set +e
+  "$@"
+  status=$?
+  set -e
+  cleanup
+  trap - EXIT INT TERM
+  return "$status"
+}
+
+cmd_on_event() {
+  local harness="${1:-}" echo_mode="${2:-}" json model frame dir top_harness
+  is_harness "$harness" || die "on-event needs a harness"
+  json="$(cat || true)"
+  model="$(model_from_json_text "$json" || true)"
+  if [ -z "$model" ]; then
+    dir="$(session_dir 2>/dev/null || true)"
+    if [ -n "$dir" ]; then
+      frame="$(top_frame_name "$dir" 2>/dev/null || true)"
+      if [ -n "$frame" ]; then
+        top_harness="$(read_frame "$dir/frames/$frame" harness || true)"
+        if [ "$top_harness" = "$harness" ]; then
+          if [ "$echo_mode" = "echo" ]; then
+            model="$(read_frame "$dir/frames/$frame" model || true)"
+            [ -n "$model" ] && printf '%s\n' "$model"
+          fi
+          return 0
+        fi
+      fi
+    fi
+    model="$(model_from_config "$harness" || true)"
+  fi
+  if [ -n "$model" ]; then
+    push_or_replace "$harness" "$model" || true
+  fi
+  if [ "$echo_mode" = "echo" ] && [ -n "$model" ]; then
+    printf '%s\n' "$model"
+  fi
+}
+
+cmd_palette() {
+  local kind name r g b h m slot hex
+  printf '%-8s %-32s %s\n' "HARNESS" "MODEL" "COLOR"
+  while IFS="$(printf '\t')" read -r kind h m slot _; do
+    case "$kind" in
+      pin)
+        hex="$(color_hex "$h" "$m")"
+        printf '%-8s %-32s %s\n' "$h" "$m" "$hex"
+        ;;
+    esac
+  done <"$PALETTE"
+}
+
+cmd_preview() {
+  local kind h m slot hex r g b
+  while IFS="$(printf '\t')" read -r kind h m slot _; do
+    [ "$kind" = "pin" ] || continue
+    hex="$(color_hex "$h" "$m")"
+    read -r r g b <<EOF
+$(hex_channels "$hex")
+EOF
+    printf '\033[48;2;%d;%d;%dm  %-8s %-32s \033[0m %s\n' "$r" "$g" "$b" "$h" "$m" "$hex"
+  done <"$PALETTE"
+}
+
+cmd_doctor() {
+  local backend tty_path harness model hex file
+  backend="$(backend_name)"
+  printf 'backend: %s\n' "$backend"
+  if tty_path="$(current_tty)"; then
+    printf 'tty: %s\n' "$tty_path"
+  else
+    printf 'tty: none\n'
+  fi
+  if [ "$backend" = "apple" ] && [ -n "${tty_path:-}" ]; then
+    if apple_invoke get "$tty_path" >/dev/null 2>&1; then
+      printf 'terminal tab: matched\n'
+    else
+      printf 'terminal tab: not matched\n'
+    fi
+  fi
+  for harness in codex claude grok agy muse prime; do
+    model="$(model_from_config "$harness" || true)"
+    if [ -n "$model" ]; then
+      hex="$(color_hex "$harness" "$model")"
+      printf '%-8s %s  %s\n' "$harness" "$hex" "$model"
+    else
+      printf '%-8s %s\n' "$harness" "(no saved model)"
+    fi
+  done
+  file="$(zshrc_file)"
+  if [ -f "$file" ] && grep -q "$MARKER_BEGIN" "$file"; then
+    printf 'shell: wired in %s\n' "$file"
+  else
+    printf 'shell: not wired\n'
+  fi
+  file="$(grok_config_file)"
+  if [ -f "$file" ] && grep -q "$MARKER_BEGIN" "$file"; then
+    printf 'grok: status line wired\n'
+  else
+    printf 'grok: status line not wired\n'
+  fi
+  file="$(claude_settings_file)"
+  if [ -f "$file" ] && grep -q "harness-tint on-event claude" "$file"; then
+    printf 'claude: model-switch hook wired\n'
+  else
+    printf 'claude: model-switch hook not wired\n'
+  fi
+  file="$(codex_hooks_file)"
+  if [ -f "$file" ] && grep -q "harness-tint on-event codex" "$file"; then
+    printf 'codex: hooks wired\n'
+  else
+    printf 'codex: hooks not wired\n'
+  fi
+  file="$(agy_settings_file)"
+  if [ -f "$file" ] && grep -q "harness-tint on-statusline agy" "$file"; then
+    printf 'agy: status line wired\n'
+  else
+    printf 'agy: status line not wired\n'
+  fi
+}
+
+bin_path() {
+  printf '%s\n' "$ROOT/bin/harness-tint"
+}
+
+replace_marked_block() {
+  local file="$1" block="$2" tmp
+  tmp="$(mktemp)"
+  if [ -f "$file" ] && grep -q "$MARKER_BEGIN" "$file"; then
+    awk -v begin="$MARKER_BEGIN" -v end="$MARKER_END" '
+      $0 == begin { skip = 1; next }
+      $0 == end { skip = 0; next }
+      skip != 1 { print }
+    ' "$file" >"$tmp"
+  elif [ -f "$file" ]; then
+    cat "$file" >"$tmp"
+  else
+    : >"$tmp"
+  fi
+  if [ -s "$tmp" ]; then
+    printf '\n' >>"$tmp"
+  fi
+  printf '%s\n' "$block" >>"$tmp"
+  mkdir -p "$(dirname -- "$file")"
+  mv "$tmp" "$file"
+}
+
+remove_marked_block() {
+  local file="$1" tmp
+  [ -f "$file" ] || return 0
+  grep -q "$MARKER_BEGIN" "$file" || return 0
+  tmp="$(mktemp)"
+  awk -v begin="$MARKER_BEGIN" -v end="$MARKER_END" '
+    $0 == begin { skip = 1; next }
+    $0 == end { skip = 0; next }
+    skip != 1 { print }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+install_shell() {
+  local zshrc block
+  zshrc="$(zshrc_file)"
+  block="$MARKER_BEGIN
+source \"$ROOT/share/zshrc.zsh\"
+$MARKER_END"
+  replace_marked_block "$zshrc" "$block"
+  note "shell wrappers sourced from $zshrc"
+}
+
+install_grok() {
+  local file block cmd
+  file="$(grok_config_file)"
+  cmd="$(bin_path)"
+  block="$MARKER_BEGIN
+[ui.status_line]
+type = \"command\"
+command = \"$cmd on-statusline grok\"
+$MARKER_END"
+  if [ -f "$file" ] && grep -q '^\[ui.status_line\]' "$file" && ! grep -q "$MARKER_BEGIN" "$file"; then
+    note "grok already has [ui.status_line]; left it unchanged"
+    return 0
+  fi
+  mkdir -p "$(dirname -- "$file")"
+  [ -f "$file" ] || : >"$file"
+  replace_marked_block "$file" "$block"
+  note "grok status line updates the tint when the model changes"
+}
+
+install_claude() {
+  local file cmd
+  file="$(claude_settings_file)"
+  cmd="$(bin_path) on-event claude"
+  command -v python3 >/dev/null 2>&1 || {
+    note "python3 is required to edit Claude settings; skipped"
+    return 0
+  }
+  mkdir -p "$(dirname -- "$file")"
+  [ -f "$file" ] || printf '%s\n' '{}' >"$file"
+  python3 - "$file" "$cmd" <<'PY'
+import json, sys
+path, cmd = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+hooks = data.setdefault("hooks", {})
+for event in ("SessionStart", "PostModelSwitch"):
+    groups = hooks.setdefault(event, [])
+    found = False
+    for group in groups:
+        for hook in group.get("hooks", []):
+            if "harness-tint on-event claude" in hook.get("command", ""):
+                hook["command"] = cmd
+                hook["type"] = "command"
+                hook["timeout"] = 5
+                found = True
+    if not found:
+        groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5}]})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+PY
+  note "claude retints on session start and model switch"
+}
+
+install_codex() {
+  local file cmd
+  file="$(codex_hooks_file)"
+  cmd="$(bin_path) on-event codex"
+  command -v python3 >/dev/null 2>&1 || {
+    note "python3 is required to edit Codex hooks; skipped"
+    return 0
+  }
+  mkdir -p "$(dirname -- "$file")"
+  [ -f "$file" ] || printf '%s\n' '{"hooks":{}}' >"$file"
+  python3 - "$file" "$cmd" <<'PY'
+import json, sys
+path, cmd = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+hooks = data.setdefault("hooks", {})
+data.setdefault("description", "Tint the terminal for the Codex model.")
+for event in ("SessionStart", "UserPromptSubmit"):
+    groups = hooks.setdefault(event, [])
+    found = False
+    for group in groups:
+        for hook in group.get("hooks", []):
+            if "harness-tint on-event codex" in hook.get("command", ""):
+                hook["command"] = cmd
+                hook["type"] = "command"
+                hook["timeout"] = 5
+                found = True
+    if not found:
+        groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 5}]})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+PY
+  note "codex hooks written; trust them once with /hooks inside Codex"
+}
+
+install_agy() {
+  local file cmd
+  file="$(agy_settings_file)"
+  cmd="$(bin_path) on-statusline agy"
+  if [ ! -f "$file" ]; then
+    note "agy settings not found; status line left unwired"
+    return 0
+  fi
+  if grep -q '"statusLine"' "$file" && ! grep -q "harness-tint on-statusline agy" "$file"; then
+    note "agy already has a statusLine; left it unchanged"
+    return 0
+  fi
+  python3 - "$file" "$cmd" <<'PY'
+import sys
+path, cmd = sys.argv[1], sys.argv[2]
+text = open(path, "r", encoding="utf-8").read()
+marker = "harness-tint on-statusline agy"
+if marker in text:
+    lines = []
+    for line in text.splitlines(keepends=True):
+        if marker in line and '"command"' in line:
+            indent = line[:len(line) - len(line.lstrip())]
+            end = ",\n" if line.rstrip().endswith(",") else "\n"
+            lines.append('%s"command": "%s"%s' % (indent, cmd, end))
+        else:
+            lines.append(line)
+    open(path, "w", encoding="utf-8").write("".join(lines))
+    raise SystemExit(0)
+if not text.startswith("{"):
+    sys.stderr.write("agy settings are not a JSON object\n")
+    raise SystemExit(1)
+rest = text[1:]
+if rest.startswith("\n"):
+    rest = rest[1:]
+block = (
+    '{\n'
+    '  "statusLine": {\n'
+    '    "type": "command",\n'
+    '    "command": "%s",\n'
+    '    "enabled": true\n'
+    '  },\n'
+) % cmd
+open(path, "w", encoding="utf-8").write(block + rest)
+PY
+  note "agy status line updates the tint when the model changes"
+}
+
+install_link() {
+  local home bindir dest
+  home="$(home_dir)"
+  bindir="$home/.local/bin"
+  dest="$bindir/harness-tint"
+  mkdir -p "$bindir"
+  if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+    note "$dest exists and is not a symlink; left it in place"
+    return 0
+  fi
+  ln -sfn "$(bin_path)" "$dest"
+  note "linked $dest"
+}
+
+cmd_install() {
+  install_link
+  install_shell
+  install_grok
+  install_claude
+  install_codex
+  install_agy
+  note "open a new terminal, or run: source \"$(zshrc_file)\""
+}
+
+uninstall_json_hooks() {
+  local file="$1" needle="$2"
+  [ -f "$file" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$file" "$needle" <<'PY'
+import json, sys
+path, needle = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    raise SystemExit(0)
+for event, groups in list(hooks.items()):
+    kept = []
+    for group in groups:
+        group["hooks"] = [
+            hook for hook in group.get("hooks", [])
+            if needle not in hook.get("command", "")
+        ]
+        if group["hooks"]:
+            kept.append(group)
+    if kept:
+        hooks[event] = kept
+    else:
+        del hooks[event]
+if not hooks:
+    data.pop("hooks", None)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+PY
+}
+
+uninstall_agy() {
+  local file
+  file="$(agy_settings_file)"
+  [ -f "$file" ] || return 0
+  grep -q "harness-tint on-statusline agy" "$file" || return 0
+  python3 - "$file" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, "r", encoding="utf-8").read()
+start = text.find('  "statusLine":')
+if start == -1 or "harness-tint on-statusline agy" not in text[start:start + 400]:
+    raise SystemExit(0)
+end = text.find("},\n", start)
+if end == -1:
+    raise SystemExit(0)
+end += 3
+open(path, "w", encoding="utf-8").write(text[:start] + text[end:])
+PY
+}
+
+cmd_uninstall() {
+  local dest
+  remove_marked_block "$(zshrc_file)"
+  remove_marked_block "$(grok_config_file)"
+  uninstall_json_hooks "$(claude_settings_file)" "harness-tint on-event claude"
+  uninstall_json_hooks "$(codex_hooks_file)" "harness-tint on-event codex"
+  uninstall_agy
+  dest="$(home_dir)/.local/bin/harness-tint"
+  if [ -L "$dest" ]; then
+    rm -f "$dest"
+  fi
+  note "removed shell wrappers and harness hooks"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: harness-tint <command> [args]
+
+  color <harness> <model>     Print the backdrop color as #rrggbb
+  palette                     Print pinned harness and model colors
+  preview                     Print the palette as terminal color swatches
+  apply <harness> [model]     Tint this terminal tab and remember the color
+  restore [harness]           Pop one tint and restore the previous color
+  wrap <harness> -- <command> Tint, run the command, then restore
+  on-event <harness>          Read a hook JSON payload on stdin and retint
+  on-statusline <harness>     Same as on-event; agy also prints the model
+  doctor                      Show backend, saved models, and install state
+  install                     Wire shell wrappers and live model updates
+  uninstall                   Remove the wrappers and hooks install added
+  help                        Show this help
+
+Harnesses: codex, claude, grok, agy, muse, prime
+HARNESS_TINT_DISABLE=1 runs a wrapped command without changing the terminal.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    color)
+      [ "$#" -eq 2 ] || die "color needs a harness and a model"
+      color_hex "$1" "$2"
+      ;;
+    palette) cmd_palette ;;
+    preview) cmd_preview ;;
+    apply) cmd_apply "$@" ;;
+    restore) cmd_restore "$@" ;;
+    wrap) cmd_wrap "$@" ;;
+    on-event) cmd_on_event "${1:-}" quiet ;;
+    on-statusline)
+      if [ "${1:-}" = "agy" ]; then
+        cmd_on_event agy echo
+      else
+        cmd_on_event "${1:-}" quiet
+      fi
+      ;;
+    doctor) cmd_doctor ;;
+    install) cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    help|-h|--help) usage ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
