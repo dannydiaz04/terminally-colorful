@@ -56,22 +56,56 @@ state_root() {
   printf '%s\n' "$base/harness-tint"
 }
 
+# ps prints "??" for a process with no terminal. Quote it: in a case pattern
+# those characters are a glob.
+normalize_tty_name() {
+  local raw="$1"
+  raw="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  case "$raw" in
+    ""|"??"|"?"|"-"|"notatty"|"/dev/tty"|"tty") return 1 ;;
+  esac
+  case "$raw" in
+    /dev/*) printf '%s\n' "$raw" ;;
+    *) printf '/dev/%s\n' "$raw" ;;
+  esac
+}
+
+# A harness runs shell commands with no controlling terminal. The terminal
+# belongs to the harness process above them.
+tty_from_ancestors() {
+  local pid ppid raw path
+  pid=$$
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+    ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$ppid" ] && [ "$ppid" != "$pid" ] || return 1
+    pid="$ppid"
+    raw="$(ps -o tty= -p "$pid" 2>/dev/null || true)"
+    if path="$(normalize_tty_name "$raw")"; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 current_tty() {
+  local t
   if [ -n "${HARNESS_TINT_TTY:-}" ]; then
-    printf '%s\n' "$HARNESS_TINT_TTY"
-    return 0
-  fi
-  if [ -r /dev/tty ]; then
-    local t
-    # Opening /dev/tty prints "Device not configured" from the shell itself
-    # when this process has no controlling terminal. Keep that off stderr.
-    t="$( (tty </dev/tty) 2>/dev/null || true)"
-    if [ -n "$t" ] && [ "$t" != "not a tty" ]; then
+    if t="$(normalize_tty_name "$HARNESS_TINT_TTY")"; then
       printf '%s\n' "$t"
       return 0
     fi
   fi
-  return 1
+  if [ -r /dev/tty ]; then
+    # Opening /dev/tty prints "Device not configured" from the shell itself
+    # when this process has no controlling terminal. Keep that off stderr.
+    t="$( (tty </dev/tty) 2>/dev/null || true)"
+    if t="$(normalize_tty_name "$t")"; then
+      printf '%s\n' "$t"
+      return 0
+    fi
+  fi
+  tty_from_ancestors
 }
 
 tty_key() {
@@ -215,28 +249,31 @@ hex_channels() {
 # --- terminal backends -----------------------------------------------------
 
 run_bounded() {
-  local pid i=0
+  local pid i=0 status=0 errexit=0
+  case $- in *e*) errexit=1 ;; esac
   "$@" &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     i=$((i + 1))
     if [ "$i" -gt 40 ]; then
       kill "$pid" 2>/dev/null || true
+      set +e
       wait "$pid" 2>/dev/null || true
+      [ "$errexit" -eq 1 ] && set -e
       return 124
     fi
     sleep 0.1
   done
   set +e
   wait "$pid"
-  local status=$?
-  set -e
+  status=$?
+  [ "$errexit" -eq 1 ] && set -e
   return "$status"
 }
 
 apple_invoke() {
   local mode="$1" tty_path="$2" r16="${3:-}" g16="${4:-}" b16="${5:-}" title="${6:-}"
-  run_bounded /usr/bin/osascript - "$mode" "$tty_path" "$r16" "$g16" "$b16" "$title" <<'APPLESCRIPT'
+  run_bounded /usr/bin/osascript - "$mode" "$tty_path" "$r16" "$g16" "$b16" "$title" <<'APPLESCRIPT' || return $?
 on run argv
   set mode to item 1 of argv
   set targetTty to item 2 of argv
@@ -322,7 +359,7 @@ EOF
       printf 'set %s %s\n' "$hex" "$title" >>"$(dry_log)"
       ;;
     apple)
-      apple_invoke set "$(current_tty)" "$r16" "$g16" "$b16" "$title" >/dev/null
+      apple_invoke set "$(current_tty)" "$r16" "$g16" "$b16" "$title" >/dev/null || return 1
       ;;
     osc)
       osc_set "$hex"
@@ -349,7 +386,7 @@ backend_reset() {
       read -r r g b <<EOF
 $(cat "$(session_dir)/original_rgb")
 EOF
-      apple_invoke set "$(current_tty)" "$r" "$g" "$b" "$title" >/dev/null
+      apple_invoke set "$(current_tty)" "$r" "$g" "$b" "$title" >/dev/null || return 1
       ;;
     osc)
       osc_reset
@@ -366,6 +403,11 @@ acquire_lock() {
   local dir="$1" i=0
   mkdir -p "$dir"
   while ! mkdir "$dir/lock" 2>/dev/null; do
+    # A command killed mid-paint leaves this directory behind.
+    if [ -n "$(find "$dir/lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      rm -rf "$dir/lock"
+      continue
+    fi
     i=$((i + 1))
     if [ "$i" -gt 50 ]; then
       return 1
@@ -675,7 +717,10 @@ cmd_wrap() {
     set -e
     return "$status"
   fi
-  local cleaned=0
+  local cleaned=0 tty_path
+  if tty_path="$(current_tty)"; then
+    export HARNESS_TINT_TTY="$tty_path"
+  fi
   if ! hold_session "$harness"; then
     log "backdrop unchanged"
   fi

@@ -11,7 +11,7 @@ When the user asks for a backdrop color, run one command and reply with the name
 - The user described one, such as something blue: `harness-tint list --free`, choose a matching id, then `harness-tint use <id>`.
 - Otherwise: `harness-tint pick`.
 
-The reply is one sentence using that name, such as "This terminal is Deep Cobalt." If the command fails, say that the terminal color did not change.
+The reply is one sentence using that name, such as "This terminal is Deep Cobalt." If the command fails, say that the terminal color did not change and quote the error it printed.
 
 When the user asks which color this terminal is, run `harness-tint current` and answer with that name. When they ask which colors exist, run `harness-tint list`.
 

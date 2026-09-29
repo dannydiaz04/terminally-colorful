@@ -136,6 +136,13 @@ else
 fi
 expect_eq "current is none before a pick" "none" "$("${HT[@]}" current)"
 
+got="$(HARNESS_TINT_TTY=/dev/tty "${HT[@]}" doctor | awk '/^tty: / { print; exit }')"
+if [ "$got" = "tty: /dev/tty" ]; then
+  fail "a bare /dev/tty is not a terminal tab"
+else
+  pass "a bare /dev/tty is not a terminal tab"
+fi
+
 reset_log
 first="$("${HT[@]}" list --free | awk -F '\t' 'NR == 1 { print $2; exit }')"
 got="$("${HT[@]}" pick)"

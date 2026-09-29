@@ -33,7 +33,7 @@ Prime often leaves the main canvas on the terminal background, so the window col
 
 Claude Code, Codex, agy, and Muse paint their own full-screen backgrounds. The window color is there before they take over the screen and after they exit.
 
-The shell wrappers do not choose a color. They remember the backdrop when a harness starts and restore it when that harness exits, including a harness started inside another one. `HARNESS_TINT_DISABLE=1 claude` runs the real CLI and leaves the tab alone.
+The shell wrappers do not choose a color. They remember the backdrop when a harness starts and restore it when that harness exits, including a harness started inside another one. A command the harness runs has no terminal of its own, so the color is applied to the terminal the harness was opened in. `HARNESS_TINT_DISABLE=1 claude` runs the real CLI and leaves the tab alone.
 
 ## Terminals
 
