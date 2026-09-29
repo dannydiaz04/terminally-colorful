@@ -1,19 +1,10 @@
 # harness-tint
 
-Color the terminal tab for the coding harness you are in, and use a lighter or darker shade of that same hue for the model.
+Pick a named color for a terminal, then tell it apart from the others.
 
-| Harness | Hue |
-| --- | --- |
-| Codex | blue |
-| Claude Code | amber |
-| Grok Build | magenta |
-| agy | green |
-| Muse | violet |
-| Prime | teal |
+The catalog has 100 dark colors in [share/colors.tsv](share/colors.tsv). A skill, [skills/terminal-color/SKILL.md](skills/terminal-color/SKILL.md), tells the model to choose one when you ask, apply it, and say the name. Colors are not assigned by harness or model.
 
-Pinned models get a fixed shade. Any other model name hashes to one of five shades in that harness, so the color stays put across launches. Edit [share/palette.tsv](share/palette.tsv) to change a hue or pin a model.
-
-The window color is the backdrop. A full-screen harness paints its own background over that window, and it also sets the tab title itself, so harness-tint leaves the title alone.
+The window color is the backdrop. A full-screen harness paints its own background over that window, and it also sets the tab title itself, so harness-tint leaves the title alone. The color shows in the window before that harness takes over the screen and after it exits. Grok shows it for the whole session.
 
 ## Install
 
@@ -24,32 +15,25 @@ From a checkout of this repo:
 source ~/.zshrc
 ```
 
-`install` does five things:
+`install` symlinks `~/.local/bin/harness-tint`, sources the shell wrappers from `~/.zshrc`, and links the `terminal-color` skill into the user skill directories for Grok, Claude Code, Codex, agy, Prime, and Muse. It also removes automatic model tinting (Grok status line, Claude hooks, Codex hooks, agy status line) if an earlier version added it.
 
-- Symlinks `~/.local/bin/harness-tint`
-- Sources the wrappers from `~/.zshrc`
-- Points Grok's status line at a silent retint command
-- Adds Claude Code `SessionStart` and `PostModelSwitch` hooks
-- Adds Codex `SessionStart` and `UserPromptSubmit` hooks
-- Adds an agy status line when that file does not already have one
+Open a new terminal after installing. The first time a color is applied, macOS asks for permission to let `osascript` control Terminal. Allow it.
 
-Open a new terminal after installing. The first time the tint runs, macOS asks for permission to let `osascript` control Terminal. Allow it.
+Inside a harness, ask it to pick a color, or run `/terminal-color`. It applies one and tells you the name. Ask again when you want a different one.
 
-Inside Codex, run `/hooks` once and trust the harness-tint hook. Codex skips a new hook until you do.
-
-`./bin/harness-tint doctor` shows the backend, the model each harness has saved, and which pieces are wired. `./bin/harness-tint uninstall` removes the wrappers and the hooks this tool added.
+`./bin/harness-tint doctor` shows the backend, the catalog, and which pieces are wired. `./bin/harness-tint uninstall` removes the wrappers and the skill links.
 
 Bash can source [share/bashrc.sh](share/bashrc.sh) instead of the zsh file.
 
 ## What you see
 
-Grok shows the tint for the whole session. The `grok` wrapper sets `GROK_THEME=terminal` and `GROK_TERMINAL_THEME=1` for that process, and Grok's terminal theme leaves the window canvas visible. A model change, including `/model`, retints through the status line. Your saved Grok theme is left as it is; the terminal theme applies only to `grok` launched from the wrapper.
+Grok shows the color for the whole session. The `grok` wrapper sets `GROK_THEME=terminal` and `GROK_TERMINAL_THEME=1` for that process, and Grok's terminal theme leaves the window canvas visible. Your saved Grok theme is left as it is.
 
-Prime often leaves the main canvas on the terminal background, so the window color shows through there too. Launch flags `--provider` and `--model` are part of the color, so `llama/gemma-4-31b` is a different shade from `openai-codex/gpt-6-astra`.
+Prime often leaves the main canvas on the terminal background, so the window color shows through there too.
 
-Claude Code, Codex, agy, and Muse paint their own full-screen backgrounds. The window color is there before they take over the screen and after they exit. Claude retints when the session starts and when you switch models. Codex retints on session start and on the next prompt after a model change. agy retints when its status line runs. Muse and Prime pick up the model at launch.
+Claude Code, Codex, agy, and Muse paint their own full-screen backgrounds. The window color is there before they take over the screen and after they exit.
 
-`HARNESS_TINT_DISABLE=1 claude` runs the real CLI and leaves the tab alone.
+The shell wrappers do not choose a color. They remember the backdrop when a harness starts and restore it when that harness exits, including a harness started inside another one. `HARNESS_TINT_DISABLE=1 claude` runs the real CLI and leaves the tab alone.
 
 ## Terminals
 
@@ -64,14 +48,16 @@ Claude Code, Codex, agy, and Muse paint their own full-screen backgrounds. The w
 ## Commands
 
 ```text
+harness-tint pick
+harness-tint use "Deep Cobalt"
+harness-tint list
+harness-tint list --free
+harness-tint current
 harness-tint preview
-harness-tint color codex gpt-6-luna
-harness-tint apply claude sonnet
-harness-tint restore
 harness-tint doctor
 ```
 
-Shell wrappers call `wrap`, which tints, runs the real binary, and restores the previous color on exit. A Prime session started inside a Claude session restores the Claude color when Prime exits, then the original terminal color when Claude exits.
+`pick` applies a color that is not already in use on another terminal and prints its name. `use` applies a specific id or name from the catalog. `list --free` hides colors that are already on a terminal.
 
 ## Tests
 
@@ -79,4 +65,4 @@ Shell wrappers call `wrap`, which tints, runs the real binary, and restores the 
 make test
 ```
 
-The suite runs under `/bin/bash` so it stays compatible with the Bash 3.2 that ships with macOS.
+The suite runs under `/bin/bash` so it stays compatible with the Bash 3.2 that ships with macOS. Regenerate the catalog with `python3 share/generate-colors.py`.

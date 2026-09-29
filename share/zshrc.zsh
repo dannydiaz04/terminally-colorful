@@ -1,5 +1,6 @@
-# Wrappers tint the current terminal, then run the real CLI.
-# Install sources this file. HARNESS_TINT_DISABLE=1 skips the tint.
+# Wrappers remember the terminal color and restore it when the CLI exits.
+# Pick a color with harness-tint. HARNESS_TINT_DISABLE=1 skips the bookkeeping.
+# grok uses the terminal theme so a picked color stays visible for the session.
 
 _ht_root="${HARNESS_TINT_ROOT:-$(cd "$(dirname -- "${(%):-%x}")/.." && pwd)}"
 _ht_bin="${HARNESS_TINT_BIN:-$_ht_root/bin/harness-tint}"

@@ -1,4 +1,5 @@
 # Bash equivalent of share/zshrc.zsh.
+# Wrappers remember the terminal color and restore it when the CLI exits.
 _ht_root="${HARNESS_TINT_ROOT:-$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 _ht_bin="${HARNESS_TINT_BIN:-$_ht_root/bin/harness-tint}"
 

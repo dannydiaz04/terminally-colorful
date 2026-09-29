@@ -1,0 +1,102 @@
+# id	name	hex
+# Dark backdrop colors. Light text stays readable. harness-tint list reads this file.
+crimson-ink	Ink Crimson	#581817
+crimson-deep	Deep Crimson	#712523
+crimson	Crimson	#883330
+crimson-soft	Soft Crimson	#98413d
+crimson-glow	Glow Crimson	#a7504b
+rust-ink	Ink Rust	#4d2310
+rust-deep	Deep Rust	#64311c
+rust	Rust	#784028
+rust-soft	Soft Rust	#874e36
+rust-glow	Glow Rust	#955c44
+copper-ink	Ink Copper	#44290f
+copper-deep	Deep Copper	#58381b
+copper	Copper	#6b4728
+copper-soft	Soft Copper	#795535
+copper-glow	Glow Copper	#876344
+amber-ink	Ink Amber	#3c2c0f
+amber-deep	Deep Amber	#4f3c1b
+amber	Amber	#614c28
+amber-soft	Soft Amber	#6f5935
+amber-glow	Glow Amber	#7d6744
+olive-ink	Ink Olive	#352f0f
+olive-deep	Deep Olive	#473f1b
+olive	Olive	#584f28
+olive-soft	Soft Olive	#655d35
+olive-glow	Glow Olive	#736b43
+moss-ink	Ink Moss	#2d310f
+moss-deep	Deep Moss	#3d421b
+moss	Moss	#4d5227
+moss-soft	Soft Moss	#5a6035
+moss-glow	Glow Moss	#686e43
+fern-ink	Ink Fern	#20340f
+fern-deep	Deep Fern	#2e461b
+fern	Fern	#3c5627
+fern-soft	Soft Fern	#496435
+fern-glow	Glow Fern	#577243
+forest-ink	Ink Forest	#12351d
+forest-deep	Deep Forest	#1e472a
+forest	Forest	#2b5837
+forest-soft	Soft Forest	#396644
+forest-glow	Glow Forest	#477452
+pine-ink	Ink Pine	#123529
+pine-deep	Deep Pine	#1e4639
+pine	Pine	#2b5748
+pine-soft	Soft Pine	#396555
+pine-glow	Glow Pine	#477363
+jade-ink	Ink Jade	#123431
+jade-deep	Deep Jade	#1e4642
+jade	Jade	#2b5652
+jade-soft	Soft Jade	#39645f
+jade-glow	Glow Jade	#48726d
+teal-ink	Ink Teal	#123337
+teal-deep	Deep Teal	#1e4549
+teal	Teal	#2b555a
+teal-soft	Soft Teal	#396368
+teal-glow	Glow Teal	#487176
+lagoon-ink	Ink Lagoon	#12333d
+lagoon-deep	Deep Lagoon	#1e4451
+lagoon	Lagoon	#2b5463
+lagoon-soft	Soft Lagoon	#396271
+lagoon-glow	Glow Lagoon	#47707f
+cobalt-ink	Ink Cobalt	#123147
+cobalt-deep	Deep Cobalt	#1e435c
+cobalt	Cobalt	#2a536f
+cobalt-soft	Soft Cobalt	#38617d
+cobalt-glow	Glow Cobalt	#476f8c
+navy-ink	Ink Navy	#0e2d5d
+navy-deep	Deep Navy	#1a3e76
+navy	Navy	#274e8b
+navy-soft	Soft Navy	#345c9b
+navy-glow	Glow Navy	#436ba9
+indigo-ink	Ink Indigo	#25256b
+indigo-deep	Deep Indigo	#34387d
+indigo	Indigo	#424794
+indigo-soft	Soft Indigo	#4e54a9
+indigo-glow	Glow Indigo	#5a62ba
+violet-ink	Ink Violet	#391d6a
+violet-deep	Deep Violet	#4a2e81
+violet	Violet	#5a3f93
+violet-soft	Soft Violet	#684ba9
+violet-glow	Glow Violet	#7758bb
+orchid-ink	Ink Orchid	#461a5b
+orchid-deep	Deep Orchid	#5c2775
+orchid	Orchid	#6f358b
+orchid-soft	Soft Orchid	#7d439a
+orchid-glow	Glow Orchid	#8b53a9
+plum-ink	Ink Plum	#4f184a
+plum-deep	Deep Plum	#662561
+plum	Plum	#7b3374
+plum-soft	Soft Plum	#8a4183
+plum-glow	Glow Plum	#995091
+wine-ink	Ink Wine	#54173a
+wine-deep	Deep Wine	#6c244d
+wine	Wine	#82325e
+wine-soft	Soft Wine	#91406c
+wine-glow	Glow Wine	#a04f7a
+rose-ink	Ink Rose	#561829
+rose-deep	Deep Rose	#702439
+rose	Rose	#863248
+rose-soft	Soft Rose	#954055
+rose-glow	Glow Rose	#a54f63
